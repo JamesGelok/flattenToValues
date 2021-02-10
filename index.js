@@ -53,10 +53,7 @@ const result1 = flattenToValues(obj1);
 const result2 = flattenToValues(obj2);
 const result3 = flattenToValues(obj3);
 const result4 = flattenToValues(obj4);
-const result5 = flattenToValues(obj5, (el) => {
-  // console.log('myKey' in el)
-  return 'myKey' in el
-});
+const result5 = flattenToValues(obj5, (el) => 'myKey' in el);
 
 console.log(obj1, 'into', result1);
 console.log("-------------------");
