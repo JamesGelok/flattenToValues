@@ -1,0 +1,61 @@
+name: K3 checkpoint bridge
+
+on:
+  push:
+    branches:
+      - research/k3-checkpoint-bridge-20260831
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download public release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bundle
+          base="https://github.com/cneuralnetwork/smol-kimi-k3/releases/download/v0.1.0-tinystories"
+          for file in model.safetensors config.json tokenizer.json training_metadata.json sha256sums.txt; do
+            curl --fail --location --retry 5 --retry-all-errors \
+              --output "bundle/${file}" "${base}/${file}"
+          done
+
+      - name: Verify release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd bundle
+          sha256sum --check sha256sums.txt
+          test "$(sha256sum model.safetensors | cut -d' ' -f1)" = \
+            "71bffecf1eb71228fa6aed2152c0c13fd66118b0db2efb7bbe457109b7cb1d43"
+          python - <<'PY'
+          import hashlib, json, pathlib
+          root = pathlib.Path(".")
+          files = {}
+          for path in sorted(root.iterdir()):
+              if path.is_file():
+                  files[path.name] = {
+                      "bytes": path.stat().st_size,
+                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  }
+          pathlib.Path("bridge_provenance.json").write_text(json.dumps({
+              "source_repository": "cneuralnetwork/smol-kimi-k3",
+              "source_release": "v0.1.0-tinystories",
+              "source_model_sha256": "71bffecf1eb71228fa6aed2152c0c13fd66118b0db2efb7bbe457109b7cb1d43",
+              "files": files,
+          }, indent=2) + "\n")
+          PY
+
+      - name: Upload verified checkpoint artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smol-kimi-k3-v0.1.0-tinystories
+          path: bundle/
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
