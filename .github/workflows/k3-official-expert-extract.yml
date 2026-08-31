@@ -1,0 +1,195 @@
+name: Official K3 64-expert extract
+
+on:
+  push:
+    branches:
+      - research/k3-checkpoint-bridge-20260831
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Download official K3 index and config
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p extract
+          base="https://huggingface.co/moonshotai/Kimi-K3/resolve/main"
+          curl --fail --location --retry 5 --retry-all-errors \
+            -o extract/config.json "$base/config.json"
+          curl --fail --location --retry 5 --retry-all-errors \
+            -o extract/model.safetensors.index.json "$base/model.safetensors.index.json"
+
+      - name: Extract layer 46 experts 0 through 63 by HTTP ranges
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/extract_k3.py <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import struct
+          import subprocess
+          import tempfile
+
+          root = pathlib.Path("extract")
+          index = json.loads((root / "model.safetensors.index.json").read_text())
+          weight_map = index["weight_map"]
+          layer = 46
+          experts = set(range(64))
+          rx = re.compile(r"layers\.(\d+).*experts\.(\d+)")
+          selected_names = []
+          shard = None
+          for name, filename in weight_map.items():
+              match = rx.search(name)
+              if match and int(match.group(1)) == layer and int(match.group(2)) in experts:
+                  selected_names.append(name)
+                  if shard is None:
+                      shard = filename
+                  elif shard != filename:
+                      raise RuntimeError(f"selected tensors span multiple shards: {shard}, {filename}")
+          if len(selected_names) != 64 * 6:
+              raise RuntimeError(f"expected 384 selected tensors, got {len(selected_names)}")
+          if shard is None:
+              raise RuntimeError("no shard found")
+
+          url = f"https://huggingface.co/moonshotai/Kimi-K3/resolve/main/{shard}"
+
+          def curl_range(start: int, end: int, output: pathlib.Path):
+              subprocess.run([
+                  "curl", "--fail", "--location", "--retry", "8", "--retry-all-errors",
+                  "--header", f"Range: bytes={start}-{end}",
+                  "--output", str(output), url,
+              ], check=True)
+              expected = end - start + 1
+              actual = output.stat().st_size
+              if actual != expected:
+                  raise RuntimeError(f"range {start}-{end}: expected {expected}, got {actual}")
+
+          with tempfile.TemporaryDirectory() as td:
+              td = pathlib.Path(td)
+              head8 = td / "head8.bin"
+              curl_range(0, 7, head8)
+              header_len = struct.unpack("<Q", head8.read_bytes())[0]
+              header_file = td / "header.json"
+              curl_range(8, 8 + header_len - 1, header_file)
+              header = json.loads(header_file.read_bytes().decode("utf-8").rstrip(" \t\r\n\x00"))
+              data_base = 8 + header_len
+
+              metas = []
+              for name in selected_names:
+                  meta = header[name]
+                  begin, end = meta["data_offsets"]
+                  metas.append((begin, end, name, meta))
+              metas.sort()
+
+              # Merge adjacent selected tensors into the fewest HTTP ranges.
+              runs = []
+              for begin, end, name, meta in metas:
+                  if not runs or begin != runs[-1][1]:
+                      runs.append([begin, end, [(begin, end, name, meta)]])
+                  else:
+                      runs[-1][1] = end
+                      runs[-1][2].append((begin, end, name, meta))
+
+              payload = root / "official_k3_layer46_experts000_063.payload"
+              selected_header = {}
+              cursor = 0
+              with payload.open("wb") as out:
+                  for run_idx, (run_begin, run_end, tensors) in enumerate(runs):
+                      part = td / f"run_{run_idx:03d}.bin"
+                      curl_range(data_base + run_begin, data_base + run_end - 1, part)
+                      blob = part.read_bytes()
+                      out.write(blob)
+                      for begin, end, name, meta in tensors:
+                          relative_begin = cursor + (begin - run_begin)
+                          relative_end = cursor + (end - run_begin)
+                          selected_header[name] = {
+                              "dtype": meta["dtype"],
+                              "shape": meta["shape"],
+                              "data_offsets": [relative_begin, relative_end],
+                          }
+                      cursor += len(blob)
+
+              metadata = {
+                  "source_repository": "moonshotai/Kimi-K3",
+                  "source_shard": shard,
+                  "source_layer": str(layer),
+                  "source_experts": "0-63",
+                  "source_quantization": "mxfp4-pack-quantized",
+              }
+              header_out = {"__metadata__": metadata, **selected_header}
+              encoded = json.dumps(header_out, separators=(",", ":")).encode("utf-8")
+              padding = (-len(encoded)) % 8
+              encoded += b" " * padding
+              subset = root / "official_k3_layer46_experts000_063.safetensors"
+              with subset.open("wb") as out:
+                  out.write(struct.pack("<Q", len(encoded)))
+                  out.write(encoded)
+                  with payload.open("rb") as src:
+                      while True:
+                          chunk = src.read(16 * 1024 * 1024)
+                          if not chunk:
+                              break
+                          out.write(chunk)
+              payload.unlink()
+
+              # Fresh structural verification.
+              with subset.open("rb") as f:
+                  rebuilt_header_len = struct.unpack("<Q", f.read(8))[0]
+                  rebuilt_header = json.loads(f.read(rebuilt_header_len))
+              tensor_names = [k for k in rebuilt_header if k != "__metadata__"]
+              last_end = max(rebuilt_header[k]["data_offsets"][1] for k in tensor_names)
+              expected_size = 8 + rebuilt_header_len + last_end
+              if subset.stat().st_size != expected_size:
+                  raise RuntimeError((subset.stat().st_size, expected_size))
+              per_expert = {}
+              for expert in range(64):
+                  prefix = f"language_model.model.layers.{layer}.block_sparse_moe.experts.{expert}."
+                  names = sorted(k for k in tensor_names if k.startswith(prefix))
+                  if len(names) != 6:
+                      raise RuntimeError(f"expert {expert}: {len(names)} tensors")
+                  per_expert[str(expert)] = {
+                      "tensor_count": len(names),
+                      "stored_bytes": sum(
+                          rebuilt_header[n]["data_offsets"][1] - rebuilt_header[n]["data_offsets"][0]
+                          for n in names
+                      ),
+                      "tensors": names,
+                  }
+              report = {
+                  "source_shard": shard,
+                  "source_shard_header_bytes": header_len,
+                  "http_range_runs": len(runs),
+                  "selected_tensor_count": len(tensor_names),
+                  "selected_payload_bytes": last_end,
+                  "subset_file_bytes": subset.stat().st_size,
+                  "per_expert": per_expert,
+              }
+              (root / "official_k3_layer46_experts000_063_extraction.json").write_text(
+                  json.dumps(report, indent=2) + "\n"
+              )
+              print(json.dumps({k: report[k] for k in (
+                  "source_shard", "source_shard_header_bytes", "http_range_runs",
+                  "selected_tensor_count", "selected_payload_bytes", "subset_file_bytes"
+              )}, indent=2))
+          PY
+          python /tmp/extract_k3.py
+          sha256sum extract/official_k3_layer46_experts000_063.safetensors \
+            > extract/SHA256SUMS.txt
+          rm extract/model.safetensors.index.json
+
+      - name: Upload official K3 expert slice
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-k3-layer46-experts000-063
+          path: extract/
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
