@@ -27,10 +27,22 @@ jobs:
           sha256sum --check sha256sums.txt
           test "$(stat -c%s model.safetensors)" = '98228716'
 
-      - name: Upload verified checkpoint bundle
+      - name: Capture exact public source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v0.1.0-tinystories \
+            https://github.com/cneuralnetwork/smol-kimi-k3.git upstream
+          mkdir -p artifact/source
+          cp -R upstream/k3 artifact/source/k3
+          cp upstream/generate.py upstream/requirements.txt upstream/pyproject.toml artifact/source/
+          cp -R upstream/scripts artifact/source/scripts
+          git -C upstream rev-parse HEAD > artifact/source/UPSTREAM_COMMIT
+
+      - name: Upload verified checkpoint and source bundle
         uses: actions/upload-artifact@v4
         with:
-          name: smol-kimi-k3-tinystories-verified
+          name: smol-kimi-k3-tinystories-with-source
           path: artifact/
           compression-level: 0
           retention-days: 1
