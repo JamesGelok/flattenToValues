@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Download public release bundle
+      - name: Download public release bundle and source
         shell: bash
         run: |
           set -euo pipefail
@@ -24,6 +24,8 @@ jobs:
             curl --fail --location --retry 5 --retry-all-errors \
               --output "bundle/${file}" "${base}/${file}"
           done
+          git clone --depth 1 https://github.com/cneuralnetwork/smol-kimi-k3.git bundle/source
+          rm -rf bundle/source/.git
 
       - name: Verify release checksums
         shell: bash
@@ -43,18 +45,26 @@ jobs:
                       "bytes": path.stat().st_size,
                       "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                   }
+          source_files = {}
+          for path in sorted((root / "source").rglob("*")):
+              if path.is_file():
+                  source_files[str(path.relative_to(root))] = {
+                      "bytes": path.stat().st_size,
+                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  }
           pathlib.Path("bridge_provenance.json").write_text(json.dumps({
               "source_repository": "cneuralnetwork/smol-kimi-k3",
               "source_release": "v0.1.0-tinystories",
               "source_model_sha256": "71bffecf1eb71228fa6aed2152c0c13fd66118b0db2efb7bbe457109b7cb1d43",
               "files": files,
+              "source_files": source_files,
           }, indent=2) + "\n")
           PY
 
       - name: Upload verified checkpoint artifact
         uses: actions/upload-artifact@v4
         with:
-          name: smol-kimi-k3-v0.1.0-tinystories
+          name: smol-kimi-k3-v0.1.0-tinystories-source
           path: bundle/
           compression-level: 0
           retention-days: 1
