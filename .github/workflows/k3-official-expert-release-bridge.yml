@@ -1,0 +1,57 @@
+name: Temporary official K3 expert release bridge
+
+on:
+  push:
+    branches:
+      - research/k3-checkpoint-bridge-20260831
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: k3-expert-bridge-20260831
+    steps:
+      - name: Recover latest verified extraction artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p recovered
+          run_id=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "Official K3 64-expert extract" \
+            --branch "research/k3-checkpoint-bridge-20260831" \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')
+          test -n "$run_id"
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name official-k3-layer46-experts000-063 \
+            --dir recovered
+          test -s recovered/official_k3_layer46_experts000_063.safetensors
+          (cd recovered && sha256sum --check SHA256SUMS.txt)
+          printf 'source_run_id=%s\nsource_repository=moonshotai/Kimi-K3\nsource_layer=46\nsource_experts=0-63\n' \
+            "$run_id" > recovered/BRIDGE_PROVENANCE.txt
+
+      - name: Publish temporary checksum-labeled release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Temporary K3 expert research bridge" \
+            --notes "Temporary public transfer of a checksum-verified subset of the already-public moonshotai/Kimi-K3 checkpoint. Layer 46, experts 0-63. Scheduled for deletion after local verification." \
+            recovered/official_k3_layer46_experts000_063.safetensors \
+            recovered/official_k3_layer46_experts000_063_extraction.json \
+            recovered/SHA256SUMS.txt \
+            recovered/config.json \
+            recovered/BRIDGE_PROVENANCE.txt
