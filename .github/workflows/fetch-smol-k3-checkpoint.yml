@@ -1,0 +1,37 @@
+name: Fetch smol K3 checkpoint
+
+on:
+  push:
+    branches:
+      - research/k3-real-model-artifact-20260831
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download immutable public release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          base='https://github.com/cneuralnetwork/smol-kimi-k3/releases/download/v0.1.0-tinystories'
+          for file in model.safetensors config.json tokenizer.json training_metadata.json sha256sums.txt; do
+            curl --fail --location --retry 5 --retry-all-errors \
+              --output "artifact/${file}" "${base}/${file}"
+          done
+          cd artifact
+          sha256sum --check sha256sums.txt
+          test "$(stat -c%s model.safetensors)" = '98228716'
+
+      - name: Upload verified checkpoint bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: smol-kimi-k3-tinystories-verified
+          path: artifact/
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
