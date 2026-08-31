@@ -1,0 +1,100 @@
+name: Repack official K3 expert slice
+
+on:
+  push:
+    branches:
+      - research/k3-checkpoint-bridge-20260831
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  repack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download latest successful extraction artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p recovered
+          run_id=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "Official K3 64-expert extract" \
+            --branch "research/k3-checkpoint-bridge-20260831" \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')
+          test -n "$run_id"
+          echo "source_run_id=$run_id" | tee recovered/REPACK_PROVENANCE.txt
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name official-k3-layer46-experts000-063 \
+            --dir recovered
+          test -s recovered/official_k3_layer46_experts000_063.safetensors
+
+      - name: Split into transfer-sized chunks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p chunks metadata
+          cp recovered/config.json metadata/
+          cp recovered/official_k3_layer46_experts000_063_extraction.json metadata/
+          cp recovered/SHA256SUMS.txt metadata/
+          cp recovered/REPACK_PROVENANCE.txt metadata/
+          split -b 96M -d -a 2 \
+            recovered/official_k3_layer46_experts000_063.safetensors \
+            chunks/official_k3_layer46_experts000_063.safetensors.part-
+          (cd chunks && sha256sum * > ../metadata/PART_SHA256SUMS.txt)
+          ls -lh chunks metadata
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-k3-layer46-experts000-063-metadata
+          path: metadata/
+          compression-level: 6
+          retention-days: 1
+
+      - name: Upload part 00
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-00, path: chunks/*part-00, compression-level: 0, retention-days: 1}
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-01, path: chunks/*part-01, compression-level: 0, retention-days: 1}
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-02, path: chunks/*part-02, compression-level: 0, retention-days: 1}
+      - name: Upload part 03
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-03, path: chunks/*part-03, compression-level: 0, retention-days: 1}
+      - name: Upload part 04
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-04, path: chunks/*part-04, compression-level: 0, retention-days: 1}
+      - name: Upload part 05
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-05, path: chunks/*part-05, compression-level: 0, retention-days: 1}
+      - name: Upload part 06
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-06, path: chunks/*part-06, compression-level: 0, retention-days: 1}
+      - name: Upload part 07
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-07, path: chunks/*part-07, compression-level: 0, retention-days: 1}
+      - name: Upload part 08
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-08, path: chunks/*part-08, compression-level: 0, retention-days: 1}
+      - name: Upload part 09
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-09, path: chunks/*part-09, compression-level: 0, retention-days: 1}
+      - name: Upload part 10
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-10, path: chunks/*part-10, compression-level: 0, retention-days: 1}
+      - name: Upload part 11
+        if: ${{ hashFiles('chunks/*part-11') != '' }}
+        uses: actions/upload-artifact@v4
+        with: {name: official-k3-l46-e000-063-part-11, path: chunks/*part-11, compression-level: 0, retention-days: 1}
