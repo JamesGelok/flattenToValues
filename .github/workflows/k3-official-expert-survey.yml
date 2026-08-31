@@ -1,0 +1,103 @@
+name: Official K3 expert survey
+
+on:
+  push:
+    branches:
+      - research/k3-checkpoint-bridge-20260831
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  survey:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download official K3 index and config
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p survey
+          base="https://huggingface.co/moonshotai/Kimi-K3/resolve/main"
+          curl --fail --location --retry 5 --retry-all-errors \
+            -o survey/config.json "$base/config.json"
+          curl --fail --location --retry 5 --retry-all-errors \
+            -o survey/model.safetensors.index.json "$base/model.safetensors.index.json"
+
+      - name: Analyze 64-expert tensor slice
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import collections
+          import json
+          import pathlib
+          import re
+
+          root = pathlib.Path("survey")
+          idx = json.loads((root / "model.safetensors.index.json").read_text())
+          wm = idx["weight_map"]
+          expert_keys = [k for k in wm if "expert" in k.lower()]
+          sample = expert_keys[:200]
+          (root / "expert_key_samples.json").write_text(json.dumps(sample, indent=2) + "\n")
+
+          patterns = [
+              re.compile(r"layers\.(\d+).*experts\.(\d+)"),
+              re.compile(r"layers\.(\d+).*experts?\.(\d+)"),
+              re.compile(r"layers\.(\d+).*expert_(\d+)"),
+          ]
+          parsed = []
+          for key in expert_keys:
+              match = None
+              for pattern in patterns:
+                  match = pattern.search(key)
+                  if match:
+                      break
+              if match:
+                  parsed.append((int(match.group(1)), int(match.group(2)), key, wm[key]))
+
+          layers = collections.Counter(layer for layer, _, _, _ in parsed)
+          if not layers:
+              raise SystemExit("Could not parse layer/expert IDs; inspect expert_key_samples.json")
+          # Prefer a central layer with the full expert population.
+          max_experts = max(len({e for l, e, _, _ in parsed if l == layer}) for layer in layers)
+          candidate_layers = [layer for layer in layers if len({e for l, e, _, _ in parsed if l == layer}) == max_experts]
+          target_layer = min(candidate_layers, key=lambda x: abs(x - 46))
+          target_experts = set(range(64))
+          selected = [
+              {"layer": l, "expert": e, "tensor": k, "shard": shard}
+              for l, e, k, shard in parsed
+              if l == target_layer and e in target_experts
+          ]
+          shards = collections.Counter(row["shard"] for row in selected)
+          report = {
+              "metadata_total_size": idx.get("metadata", {}).get("total_size"),
+              "weight_map_entries": len(wm),
+              "expert_key_count": len(expert_keys),
+              "parsed_expert_key_count": len(parsed),
+              "layer_counts": dict(sorted(layers.items())),
+              "maximum_distinct_experts_per_layer": max_experts,
+              "target_layer": target_layer,
+              "requested_experts": 64,
+              "selected_tensor_entries": len(selected),
+              "unique_shards": len(shards),
+              "shard_tensor_counts": dict(shards),
+              "selected": selected,
+          }
+          (root / "official_k3_64_expert_survey.json").write_text(json.dumps(report, indent=2) + "\n")
+          print(json.dumps({k: report[k] for k in (
+              "metadata_total_size", "weight_map_entries", "expert_key_count",
+              "parsed_expert_key_count", "maximum_distinct_experts_per_layer",
+              "target_layer", "selected_tensor_entries", "unique_shards"
+          )}, indent=2))
+          PY
+
+      - name: Upload survey
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-k3-64-expert-survey
+          path: survey/
+          compression-level: 6
+          retention-days: 1
+          if-no-files-found: error
